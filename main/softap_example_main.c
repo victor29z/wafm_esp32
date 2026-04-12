@@ -37,7 +37,8 @@
 
 #define GPIO_STEP   5
 #define GPIO_DIR    6
-#define GPIO_ENABLE 7
+#define GPIO_ENABLE 10
+#define GPIO_MOTOR_EN 10
 
 #define MIN_SPEED_HZ 200
 #define MAX_SPEED_HZ 10000
@@ -106,6 +107,9 @@ static const char *INDEX_HTML =
     "</style></head><body><h1>Stepper Motor Control</h1>"
     "<section><label>Max speed (200-10000 pps)</label><input id='vmax' type='number' min='200' max='10000' value='4000'>"
     "<button onclick='setMaxSpeed()'>Set</button></section>"
+    "<section><label>Motor Enable</label>"
+    "<button onclick='setMotorEnable(1)'>Enable</button>"
+    "<button onclick='setMotorEnable(0)'>Disable</button></section>"
     "<section><label>Move distance (pulses, +/-)</label><input id='distance' type='number' value='1000'>"
     "<button onclick='moveOnce()' class='secondary'>Move</button></section>"
     "<section><button id='jogPos' onmousedown='jog(1,true)' onmouseup='jog(1,false)' ontouchstart='jog(1,true)' ontouchend='jog(1,false)' class='secondary'>Jog +</button>"
@@ -114,6 +118,7 @@ static const char *INDEX_HTML =
     "<button onclick='stopNow()' class='danger'>Stop</button></section>"
     "<script>const fetchPost=(url,body)=>fetch(url,{method:'POST',headers:{'Content-Type':'text/plain'},body});"
     "function setMaxSpeed(){const v=document.getElementById('vmax').value;fetchPost('/api/max_speed',v);}"
+    "function setMotorEnable(val){fetchPost('/api/enable',val);}"
     "function moveOnce(){const d=document.getElementById('distance').value;fetchPost('/api/move',d);}"
     "function jog(dir,start){fetchPost('/api/jog?action='+(start?'start':'stop')+'&dir='+dir,'');}"
     "function stopNow(){fetchPost('/api/stop','');}"
@@ -130,6 +135,7 @@ static void step_enable(bool enable)
 {
     // Active-low enable assumed; adjust here if your driver differs
     gpio_set_level(GPIO_ENABLE, enable ? 0 : 1);
+    ESP_LOGI(TAG, "a - Enable set to %d", enable ? 0 : 1);
 }
 
 static void IRAM_ATTR step_timer_cb(void *arg)
@@ -353,6 +359,9 @@ static esp_err_t parse_int_from_body(httpd_req_t *req, int32_t *out)
     return ESP_OK;
 }
 
+// forward declarations
+static void motor_enable_control(bool enable);
+
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -367,6 +376,17 @@ static esp_err_t max_speed_handler(httpd_req_t *req)
     }
     stepper_cmd_t cmd = {.type = CMD_SET_MAX_SPEED, .value = v};
     xQueueSend(s_cmd_queue, &cmd, 0);
+    return httpd_resp_sendstr(req, "ok");
+}
+
+static esp_err_t enable_handler(httpd_req_t *req)
+{
+    int32_t v = 0;
+    if (parse_int_from_body(req, &v) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+    }
+    motor_enable_control(v != 0);
+    
     return httpd_resp_sendstr(req, "ok");
 }
 
@@ -440,6 +460,7 @@ static httpd_handle_t start_webserver(void)
         httpd_uri_t jog_uri = {.uri = "/api/jog", .method = HTTP_POST, .handler = jog_handler, .user_ctx = NULL};
         httpd_uri_t stop_uri = {.uri = "/api/stop", .method = HTTP_POST, .handler = stop_handler, .user_ctx = NULL};
         httpd_uri_t step_uri = {.uri = "/api/step", .method = HTTP_POST, .handler = step_handler, .user_ctx = NULL};
+        httpd_uri_t enable_uri = {.uri = "/api/enable", .method = HTTP_POST, .handler = enable_handler, .user_ctx = NULL};
 
         httpd_register_uri_handler(server, &index_uri);
         httpd_register_uri_handler(server, &max_speed_uri);
@@ -447,6 +468,7 @@ static httpd_handle_t start_webserver(void)
         httpd_register_uri_handler(server, &jog_uri);
         httpd_register_uri_handler(server, &stop_uri);
         httpd_register_uri_handler(server, &step_uri);
+        httpd_register_uri_handler(server, &enable_uri);
     }
     return server;
 }
@@ -515,7 +537,7 @@ static void stepper_gpio_init(void)
     gpio_config_t io_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << GPIO_STEP) | (1ULL << GPIO_DIR) | (1ULL << GPIO_ENABLE),
+        .pin_bit_mask = (1ULL << GPIO_STEP) | (1ULL << GPIO_DIR) | (1ULL << GPIO_ENABLE) | (1ULL << GPIO_MOTOR_EN),
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .pull_up_en = GPIO_PULLUP_DISABLE,
     };
@@ -523,6 +545,7 @@ static void stepper_gpio_init(void)
     gpio_set_level(GPIO_STEP, 0);
     gpio_set_level(GPIO_DIR, 0);
     gpio_set_level(GPIO_ENABLE, 1); // disable by default (assuming low-enable)
+    gpio_set_level(GPIO_MOTOR_EN, 0); // motor disabled by default (high = enable)
 }
 
 void app_main(void)
@@ -549,4 +572,10 @@ void app_main(void)
     start_webserver();
 
     ESP_LOGI(TAG, "Stepper controller ready. Open http://192.168.4.1/ in browser");
+}
+
+static void motor_enable_control(bool enable)
+{
+    gpio_set_level(GPIO_MOTOR_EN, enable ? 0 : 1);
+    ESP_LOGI(TAG, "Enable set to %d", enable ? 0 : 1);
 }
