@@ -45,6 +45,9 @@
 #define PROFILE_TICK_MS 10
 #define ACCEL_STEP_PPS 70 // speed delta per PROFILE_TICK_MS
 
+#define MAX_SAMPLES 128
+#define MAX_LINES 128
+
 static const char *TAG = "stepper_ap";
 
 typedef enum {
@@ -91,20 +94,35 @@ static stepper_state_t s_state = {
     .decel_start_pulses = 0,
 };
 
+// AFM Scan parameters
+static float scan_x_size = 10.0f;
+static float scan_y_size = 10.0f;
+static float scan_x_offset = 0.0f;
+static float scan_y_offset = 0.0f;
+static float scan_rate = 1.0f;
+static int scan_samples = 128;
+static int scan_lines = 128;
+static bool scanning = false;
+static bool scan_direction_upward = true; // true: upward (from max to 0), false: downward (from 0 to max)
+static int current_scan_line = 0;
+static bool frame_completed = false;
+static float scan_data[MAX_LINES][MAX_SAMPLES]; // 256x256 float array
+
 static esp_timer_handle_t s_step_timer;
 static portMUX_TYPE s_state_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_cmd_queue;
 static volatile bool s_step_level = false;
 
 static const char *INDEX_HTML =
-    "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Stepper Control</title>"
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Stepper Control & AFM Scan</title>"
     "<style>body{font-family:Arial,Helvetica,sans-serif;background:#0f172a;color:#e2e8f0;padding:16px;}"
     "h1{font-size:20px;margin-bottom:8px;}label{display:block;margin:8px 0 4px;}"
     "input{width:160px;padding:6px;border-radius:6px;border:1px solid #1e293b;background:#0b1220;color:#e2e8f0;}"
     "button{margin:6px 6px 6px 0;padding:10px 14px;border:0;border-radius:8px;background:#22c55e;color:#0b1220;font-weight:600;cursor:pointer;}"
-    "button.danger{background:#f43f5e;color:#0b1220;}button.secondary{background:#38bdf8;color:#0b1220;}"
-    "button:active{transform:scale(0.98);}section{margin-bottom:18px;}"
-    "</style></head><body><h1>Stepper Motor Control</h1>"
+    "button.danger{background:#f43f5e;color:#0b1220;}button.secondary{background:#38bdf8;color:#0b1220;}button.stop{background:#f43f5e;color:#0b1220;}"
+    "button:active{transform:scale(0.98);}section{margin-bottom:18px;}canvas{border:1px solid #1e293b;}"
+    ".status{font-size:14px;margin:8px 0;}.top{display:flex;}.left,.right{flex:1;margin-right:10px;}"
+    "</style></head><body><div class='top'><div class='left'><h1>Stepper Motor Control</h1>"
     "<section><label>Max speed (200-10000 pps)</label><input id='vmax' type='number' min='200' max='10000' value='4000'>"
     "<button onclick='setMaxSpeed()'>Set</button></section>"
     "<section><label>Motor Enable</label>"
@@ -115,7 +133,22 @@ static const char *INDEX_HTML =
     "<section><button id='jogPos' onmousedown='jog(1,true)' onmouseup='jog(1,false)' ontouchstart='jog(1,true)' ontouchend='jog(1,false)' class='secondary'>Jog +</button>"
     "<button id='jogNeg' onmousedown='jog(-1,true)' onmouseup='jog(-1,false)' ontouchstart='jog(-1,true)' ontouchend='jog(-1,false)' class='secondary'>Jog -</button>"
     "<button onclick='singleStep(1)'>+1 Step</button><button onclick='singleStep(-1)'>-1 Step</button>"
-    "<button onclick='stopNow()' class='danger'>Stop</button></section>"
+    "<button onclick='stopNow()' class='danger'>Stop</button></section></div><div class='right'><h1>AFM Scan Control</h1>"
+    "<section><label>X Scan Size (um)</label><input id='x_scan_size' type='number' min='0' max='30' step='0.1' value='10.0'>"
+    "<label>Y Scan Size (um)</label><input id='y_scan_size' type='number' min='0' max='30' step='0.1' value='10.0'>"
+    "<label>X Offset (um)</label><input id='x_offset' type='number' min='0' max='30' step='0.1' value='0'>"
+    "<label>Y Offset (um)</label><input id='y_offset' type='number' min='0' max='30' step='0.1' value='0'>"
+    "<label>Scan Rate (Hz)</label><input id='scan_rate' type='number' min='0' max='10' step='0.1' value='1.0'>"
+    "<label>Samples (0-128)</label><input id='samples' type='number' min='0' max='128' value='128'>"
+    "<label>Lines (0-128)</label><input id='lines' type='number' min='0' max='128' value='128'>"
+    "<button onclick='updateScanParams()'>Update</button></section>"
+    "<section><button id='scanBtn' onclick='toggleScan()' class='secondary'>Scan Start</button>"
+    "<button onclick='setDirection(true)'>Upward</button><button onclick='setDirection(false)'>Downward</button></section>"
+    "<section><label>Save data after scan</label><input id='saveData' type='checkbox'></section></div></div>"
+    "<h1>Real-time Display</h1>"
+    "<section><canvas id='bitmapCanvas' width='128' height='128'></canvas></section>"
+    "<section><canvas id='curveCanvas' width='400' height='200'></canvas></section>"
+    "<div class='status' id='statusBar'>Scanning: Stopped | Direction: Upward | Current Line: 0</div>"
     "<script>const fetchPost=(url,body)=>fetch(url,{method:'POST',headers:{'Content-Type':'text/plain'},body});"
     "function setMaxSpeed(){const v=document.getElementById('vmax').value;fetchPost('/api/max_speed',v);}"
     "function setMotorEnable(val){fetchPost('/api/enable',val);}"
@@ -123,6 +156,55 @@ static const char *INDEX_HTML =
     "function jog(dir,start){fetchPost('/api/jog?action='+(start?'start':'stop')+'&dir='+dir,'');}"
     "function stopNow(){fetchPost('/api/stop','');}"
     "function singleStep(dir){fetchPost('/api/step?dir='+dir,'');}"
+    "function updateScanParams(){"
+    "const params={x_scan_size:parseFloat(document.getElementById('x_scan_size').value),"
+    "y_scan_size:parseFloat(document.getElementById('y_scan_size').value),"
+    "x_offset:parseFloat(document.getElementById('x_offset').value),"
+    "y_offset:parseFloat(document.getElementById('y_offset').value),"
+    "scan_rate:parseFloat(document.getElementById('scan_rate').value),"
+    "samples:parseInt(document.getElementById('samples').value),"
+    "lines:parseInt(document.getElementById('lines').value)};"
+    "fetchPost('/api/update_scan',JSON.stringify(params)).then(()=>{updateDisplay();});}"
+    "function toggleScan(){fetchPost('/api/scan_toggle','').then(()=>{updateDisplay();});}"
+    "function setDirection(up){fetchPost('/api/set_direction',up?'up':'down').then(()=>{updateDisplay();});}"
+    "let updateIntervalId = null;"
+    "let currentRate = 1;"
+    "function setUpdateInterval(rate){"
+    "const newRate = Math.max(1, rate);"
+    "if (currentRate === newRate && updateIntervalId) return;"
+    "if(updateIntervalId){clearInterval(updateIntervalId);}"
+    "currentRate = newRate;"
+    "updateIntervalId = setInterval(updateDisplay, 1000 / newRate);"
+    "}"
+    "function updateDisplay(){"
+    "fetch('/api/get_scan_data').then(r=>r.json()).then(data=>{"
+    "if(data.frame_completed && document.getElementById('saveData').checked){if(confirm('Frame completed. Save data?')){downloadData(dataArray, data.lines, data.samples);}}"
+    "updateBitmap(data.current_row, data.current_line, data.samples, data.lines);"
+    "updateCurve(data.row0, data.row1, data.samples);"
+    "updateStatus(data.scanning, data.direction, data.current_line);"
+    "const targetRate = data.scanning && data.scan_rate > 0 ? data.scan_rate : 1;"
+    "setUpdateInterval(targetRate);"
+    "if(data.scanning){document.getElementById('scanBtn').innerText='Stop';document.getElementById('scanBtn').className='stop';}else{document.getElementById('scanBtn').innerText='Scan Start';document.getElementById('scanBtn').className='secondary';}"
+    "}).catch(err=>console.error('scan update failed',err));}"
+    "function downloadData(data, lines, samples){"
+    "let txt='';for(let y=0;y<lines;y++){for(let x=0;x<samples;x++){txt+=data[y][x].toFixed(3);if(x<samples-1)txt+=' ';}txt+='\\n';}"
+    "const blob=new Blob([txt],{type:'text/plain'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='scan_data.txt';a.click();URL.revokeObjectURL(url);}"
+    "let dataArray = [];"
+    "function updateBitmap(currentRow, line, samples, lines){"
+    "if(dataArray.length !== lines || (dataArray[0] && dataArray[0].length !== samples)){dataArray = new Array(lines).fill().map(() => new Array(samples).fill(0));}"
+    "dataArray[line] = currentRow;"
+    "const canvas=document.getElementById('bitmapCanvas');const ctx=canvas.getContext('2d');"
+    "const imgData=ctx.createImageData(samples, lines);"
+    "for(let y=0;y<lines;y++){for(let x=0;x<samples;x++){const val=dataArray[y][x];const gray=Math.floor(val*255);imgData.data[(y*samples+x)*4]=gray;imgData.data[(y*samples+x)*4+1]=gray;imgData.data[(y*samples+x)*4+2]=gray;imgData.data[(y*samples+x)*4+3]=255;}}"
+    "ctx.putImageData(imgData,0,0);}"
+    "function updateCurve(row0, row1, samples){"
+    "const canvas=document.getElementById('curveCanvas');const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);"
+    "if(samples <= 0) return;"
+    "ctx.lineWidth = 2;"
+    "ctx.strokeStyle='red';ctx.beginPath();ctx.moveTo(0,(1-row0[0])*canvas.height);for(let i=1;i<samples;i++){const x=i*(canvas.width/samples);const y=(1-row0[i])*canvas.height;ctx.lineTo(x,y);}ctx.stroke();"
+    "ctx.strokeStyle='blue';ctx.beginPath();ctx.moveTo(0,(1-row1[0])*canvas.height);for(let i=1;i<samples;i++){const x=i*(canvas.width/samples);const y=(1-row1[i])*canvas.height;ctx.lineTo(x,y);}ctx.stroke();}"
+    "function updateStatus(scanning, direction, line){document.getElementById('statusBar').innerText=`Scanning: ${scanning?'Started':'Stopped'} | Direction: ${direction?'Upward':'Downward'} | Current Line: ${line}`;}"
+    "setUpdateInterval(1);updateDisplay();"
     "</script></body></html>";
 
 static void set_direction(int dir)
@@ -133,7 +215,6 @@ static void set_direction(int dir)
 
 static void step_enable(bool enable)
 {
-    // Active-low enable assumed; adjust here if your driver differs
     gpio_set_level(GPIO_ENABLE, enable ? 0 : 1);
     ESP_LOGI(TAG, "a - Enable set to %d", enable ? 0 : 1);
 }
@@ -446,11 +527,129 @@ static esp_err_t step_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+static esp_err_t update_scan_handler(httpd_req_t *req)
+{
+    char buf[512] = {0};
+    int total = req->content_len;
+    if (total <= 0 || total >= (int)sizeof(buf)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+    }
+    int recv_len = httpd_req_recv(req, buf, total);
+    if (recv_len <= 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
+    }
+    // Simple JSON parse
+    float x_size, y_size, x_off, y_off, rate;
+    int samp, lin;
+    sscanf(buf, "{\"x_scan_size\":%f,\"y_scan_size\":%f,\"x_offset\":%f,\"y_offset\":%f,\"scan_rate\":%f,\"samples\":%d,\"lines\":%d}",
+           &x_size, &y_size, &x_off, &y_off, &rate, &samp, &lin);
+    // Validate ranges
+    if (x_size < 0 || x_size > 30) x_size = 10.0f;
+    if (y_size < 0 || y_size > 30) y_size = 10.0f;
+    if (x_off < 0 || x_off > 30) x_off = 0.0f;
+    if (y_off < 0 || y_off > 30) y_off = 0.0f;
+    if (rate < 0 || rate > 10) rate = 1.0f;
+    if (samp < 0 || samp > 256) samp = 128;
+    if (lin < 0 || lin > 256) lin = 128;
+    scan_x_size = x_size;
+    scan_y_size = y_size;
+    scan_x_offset = x_off;
+    scan_y_offset = y_off;
+    scan_rate = rate;
+    scan_samples = samp;
+    scan_lines = lin;
+    ESP_LOGI(TAG, "Scan params updated: x_size=%.1f, y_size=%.1f, x_offset=%.1f, y_offset=%.1f, rate=%.1f, samples=%d, lines=%d", scan_x_size, scan_y_size, scan_x_offset, scan_y_offset, scan_rate, scan_samples, scan_lines);
+    return httpd_resp_sendstr(req, "ok");
+}
+
+static esp_err_t scan_toggle_handler(httpd_req_t *req)
+{
+    scanning = !scanning;
+    if (scanning) {
+        if (scan_direction_upward) {
+            current_scan_line = scan_lines - 1; // start from max
+        } else {
+            current_scan_line = 0; // start from 0
+        }
+        frame_completed = false;
+        // Initialize first two rows with random data
+        for (int i = 0; i < scan_samples; i++) {
+            scan_data[0][i] = (float)rand() / RAND_MAX;
+            scan_data[1][i] = (float)rand() / RAND_MAX;
+        }
+    }
+    ESP_LOGI(TAG, "Scanning %s", scanning ? "started" : "stopped");
+    return httpd_resp_sendstr(req, "ok");
+}
+
+static esp_err_t set_direction_handler(httpd_req_t *req)
+{
+    char buf[16] = {0};
+    int total = req->content_len;
+    if (total <= 0 || total >= (int)sizeof(buf)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+    }
+    int recv_len = httpd_req_recv(req, buf, total);
+    if (recv_len <= 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
+    }
+    if (strcmp(buf, "up") == 0) {
+        scan_direction_upward = true;
+        ESP_LOGI(TAG, "Scan direction: Upward");
+    } else if (strcmp(buf, "down") == 0) {
+        scan_direction_upward = false;
+        ESP_LOGI(TAG, "Scan direction: Downward");
+    }
+    return httpd_resp_sendstr(req, "ok");
+}
+
+static esp_err_t get_scan_data_handler(httpd_req_t *req)
+{
+    int adjacent_line = current_scan_line;
+    if (scan_direction_upward) {
+        if (current_scan_line + 1 < scan_lines) {
+            adjacent_line = current_scan_line + 1;
+        }
+    } else {
+        if (current_scan_line - 1 >= 0) {
+            adjacent_line = current_scan_line - 1;
+        }
+    }
+
+    char *json_str = malloc(64 * 1024); // 64KB buffer
+    if (!json_str) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+    }
+    char *p = json_str;
+    p += sprintf(p, "{\"scanning\":%s,\"direction\":%s,\"current_line\":%d,\"samples\":%d,\"lines\":%d,\"scan_rate\":%.1f,\"frame_completed\":%s,\"row0\":[",
+                scanning ? "true" : "false", scan_direction_upward ? "true" : "false", current_scan_line, scan_samples, scan_lines, scan_rate, frame_completed ? "true" : "false");
+    for (int x = 0; x < scan_samples; x++) {
+        p += sprintf(p, "%.3f", scan_data[current_scan_line][x]);
+        if (x < scan_samples - 1) p += sprintf(p, ",");
+    }
+    p += sprintf(p, "],\"row1\":[");
+    for (int x = 0; x < scan_samples; x++) {
+        p += sprintf(p, "%.3f", scan_data[adjacent_line][x]);
+        if (x < scan_samples - 1) p += sprintf(p, ",");
+    }
+    p += sprintf(p, "],\"current_row\":[");
+    for (int x = 0; x < scan_samples; x++) {
+        p += sprintf(p, "%.3f", scan_data[current_scan_line][x]);
+        if (x < scan_samples - 1) p += sprintf(p, ",");
+    }
+    p += sprintf(p, "]}");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    frame_completed = false; // reset after sending
+    return ESP_OK;
+}
+
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 12;
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -461,6 +660,10 @@ static httpd_handle_t start_webserver(void)
         httpd_uri_t stop_uri = {.uri = "/api/stop", .method = HTTP_POST, .handler = stop_handler, .user_ctx = NULL};
         httpd_uri_t step_uri = {.uri = "/api/step", .method = HTTP_POST, .handler = step_handler, .user_ctx = NULL};
         httpd_uri_t enable_uri = {.uri = "/api/enable", .method = HTTP_POST, .handler = enable_handler, .user_ctx = NULL};
+        httpd_uri_t update_scan_uri = {.uri = "/api/update_scan", .method = HTTP_POST, .handler = update_scan_handler, .user_ctx = NULL};
+        httpd_uri_t scan_toggle_uri = {.uri = "/api/scan_toggle", .method = HTTP_POST, .handler = scan_toggle_handler, .user_ctx = NULL};
+        httpd_uri_t set_direction_uri = {.uri = "/api/set_direction", .method = HTTP_POST, .handler = set_direction_handler, .user_ctx = NULL};
+        httpd_uri_t get_scan_data_uri = {.uri = "/api/get_scan_data", .method = HTTP_GET, .handler = get_scan_data_handler, .user_ctx = NULL};
 
         httpd_register_uri_handler(server, &index_uri);
         httpd_register_uri_handler(server, &max_speed_uri);
@@ -469,6 +672,10 @@ static httpd_handle_t start_webserver(void)
         httpd_register_uri_handler(server, &stop_uri);
         httpd_register_uri_handler(server, &step_uri);
         httpd_register_uri_handler(server, &enable_uri);
+        httpd_register_uri_handler(server, &update_scan_uri);
+        httpd_register_uri_handler(server, &scan_toggle_uri);
+        httpd_register_uri_handler(server, &set_direction_uri);
+        httpd_register_uri_handler(server, &get_scan_data_uri);
     }
     return server;
 }
@@ -548,6 +755,37 @@ static void stepper_gpio_init(void)
     gpio_set_level(GPIO_MOTOR_EN, 0); // motor disabled by default (high = enable)
 }
 
+static void scan_task(void *arg)
+{
+    while (1) {
+        if (scanning) {
+            // Generate data for current line
+            for (int i = 0; i < scan_samples; i++) {
+                scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
+            }
+            ESP_LOGI(TAG, "Scan line %d completed", current_scan_line);
+
+            // Update current line
+            if (scan_direction_upward) {
+                current_scan_line--;
+                if (current_scan_line < 0) {
+                    current_scan_line = 0;
+                    scan_direction_upward = false; // switch to downward
+                    frame_completed = true;
+                }
+            } else {
+                current_scan_line++;
+                if (current_scan_line >= scan_lines) {
+                    current_scan_line = scan_lines - 1;
+                    scan_direction_upward = true; // switch to upward
+                    frame_completed = true;
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000 / scan_rate)); // delay based on scan rate
+    }
+}
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -567,9 +805,17 @@ void app_main(void)
 
     s_cmd_queue = xQueueCreate(8, sizeof(stepper_cmd_t));
     xTaskCreatePinnedToCore(motion_task, "motion_task", 4096, NULL, 6, NULL, tskNO_AFFINITY);
+    xTaskCreatePinnedToCore(scan_task, "scan_task", 4096, NULL, 5, NULL, tskNO_AFFINITY);
 
     wifi_init_softap();
     start_webserver();
+
+    // Initialize scan data with random values
+    for (int y = 0; y < MAX_LINES; y++) {
+        for (int x = 0; x < MAX_SAMPLES; x++) {
+            scan_data[y][x] = (float)rand() / RAND_MAX;
+        }
+    }
 
     ESP_LOGI(TAG, "Stepper controller ready. Open http://192.168.4.1/ in browser");
 }

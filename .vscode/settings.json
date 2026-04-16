@@ -5,7 +5,7 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-bridge.cfg"
   ],
-  "idf.portWin": "COM7",
+  "idf.portWin": "COM5",
   "idf.toolsPathWin": "C:\\Espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
@@ -17,5 +17,8 @@
     "--compile-commands-dir=d:\\esp32proj\\stepmotor_test\\build"
   ],
   "idf.flashType": "UART",
-  "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.5.2/"
+  "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.5.2/",
+  "chat.tools.terminal.autoApprove": {
+    "&": true
+  }
 }
