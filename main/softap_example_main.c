@@ -45,8 +45,8 @@
 #define PROFILE_TICK_MS 10
 #define ACCEL_STEP_PPS 70 // speed delta per PROFILE_TICK_MS
 
-#define MAX_SAMPLES 128
-#define MAX_LINES 128
+#define MAX_SAMPLES 1024
+#define MAX_LINES 1024
 
 static const char *TAG = "stepper_ap";
 
@@ -100,13 +100,14 @@ static float scan_y_size = 10.0f;
 static float scan_x_offset = 0.0f;
 static float scan_y_offset = 0.0f;
 static float scan_rate = 1.0f;
-static int scan_samples = 128;
-static int scan_lines = 128;
+static int scan_samples = 256;
+static int scan_lines = 256;
 static bool scanning = false;
-static bool scan_direction_upward = true; // true: upward (from max to 0), false: downward (from 0 to max)
+static bool scan_direction_upward = false; // true: upward (from max to 0), false: downward (from 0 to max)
 static int current_scan_line = 0;
 static bool frame_completed = false;
-static float scan_data[MAX_LINES][MAX_SAMPLES]; // 256x256 float array
+//EXT_RAM_BSS_ATTR static float scan_data[MAX_LINES][MAX_SAMPLES]; // 256x256 float array
+EXT_RAM_BSS_ATTR static float scan_data[MAX_LINES][MAX_SAMPLES]; // 1024x1024 float array in PSRAM
 
 static esp_timer_handle_t s_step_timer;
 static portMUX_TYPE s_state_spinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -139,8 +140,8 @@ static const char *INDEX_HTML =
     "<label>X Offset (um)</label><input id='x_offset' type='number' min='0' max='30' step='0.1' value='0'>"
     "<label>Y Offset (um)</label><input id='y_offset' type='number' min='0' max='30' step='0.1' value='0'>"
     "<label>Scan Rate (Hz)</label><input id='scan_rate' type='number' min='0' max='10' step='0.1' value='1.0'>"
-    "<label>Samples (0-128)</label><input id='samples' type='number' min='0' max='128' value='128'>"
-    "<label>Lines (0-128)</label><input id='lines' type='number' min='0' max='128' value='128'>"
+    "<label>Samples (0-1024)</label><input id='samples' type='number' min='0' max='1024' value='256'>"
+    "<label>Lines (0-1024)</label><input id='lines' type='number' min='0' max='1024' value='256'>"
     "<button onclick='updateScanParams()'>Update</button></section>"
     "<section><button id='scanBtn' onclick='toggleScan()' class='secondary'>Scan Start</button>"
     "<button onclick='setDirection(true)'>Upward</button><button onclick='setDirection(false)'>Downward</button></section>"
@@ -549,8 +550,8 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     if (x_off < 0 || x_off > 30) x_off = 0.0f;
     if (y_off < 0 || y_off > 30) y_off = 0.0f;
     if (rate < 0 || rate > 10) rate = 1.0f;
-    if (samp < 0 || samp > 256) samp = 128;
-    if (lin < 0 || lin > 256) lin = 128;
+    if (samp < 0 || samp > 1024) samp = 256;
+    if (lin < 0 || lin > 1024) lin = 256;
     scan_x_size = x_size;
     scan_y_size = y_size;
     scan_x_offset = x_off;
