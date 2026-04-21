@@ -106,7 +106,6 @@ static bool scanning = false;
 static bool scan_direction_upward = false; // true: upward (from max to 0), false: downward (from 0 to max)
 static int current_scan_line = 0;
 static bool frame_completed = false;
-//EXT_RAM_BSS_ATTR static float scan_data[MAX_LINES][MAX_SAMPLES]; // 256x256 float array
 EXT_RAM_BSS_ATTR static float scan_data[MAX_LINES][MAX_SAMPLES]; // 1024x1024 float array in PSRAM
 
 static esp_timer_handle_t s_step_timer;
