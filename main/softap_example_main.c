@@ -64,6 +64,13 @@
 #define MAX_SAMPLES 1024
 #define MAX_LINES 1024
 
+
+#define ADDR_SCAN_PARAMS    0x0001
+#define ADDR_SCAN_ONOFF     0x0002
+#define ADDR_SCAN_DIRECTION 0x0003
+
+
+
 static const char *TAG = "stepper_ap";
 
 typedef enum {
@@ -138,6 +145,7 @@ spi_slave_transaction_t t = {0};
 
 
 struct {
+    uint16_t    address;
     uint16_t    scan_x_size;
     uint16_t    scan_y_size;
     uint16_t    scan_x_offset;
@@ -145,7 +153,9 @@ struct {
     uint16_t    scan_rate;
     uint16_t    scan_samples;
     uint16_t    scan_lines;
-} scan_params_transfer;
+    uint8_t     is_scanning; // 0 for stopped, 1 for scanning
+    uint8_t     scan_direction; // 0 for downward, 1 for upward
+    } scan_params_transfer;
 
 
 static const char *INDEX_HTML =
@@ -632,6 +642,7 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     scan_samples = samp;
     scan_lines = lin;
 
+    scan_params_transfer.address = ADDR_SCAN_PARAMS;
     scan_params_transfer.scan_x_size = (uint16_t)(scan_x_size * 1000.0); // convert to nm for transfer
     scan_params_transfer.scan_y_size = (uint16_t)(scan_y_size * 1000.0);
     scan_params_transfer.scan_x_offset = (uint16_t)(scan_x_offset * 1000.0);
@@ -640,7 +651,7 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     scan_params_transfer.scan_samples = (uint16_t)(scan_samples);
     scan_params_transfer.scan_lines = (uint16_t)(scan_lines);
     
-    ESP_LOGI(TAG, "Scan params transferred: x_size=%d, y_size=%d, x_offset=%d, y_offset=%d, rate=%d, samples=%d, lines=%d", scan_params_transfer.scan_x_size, scan_params_transfer.scan_y_size, scan_params_transfer.scan_x_offset, scan_params_transfer.scan_y_offset, scan_params_transfer.scan_rate, scan_params_transfer.scan_samples, scan_params_transfer.scan_lines);
+    // ESP_LOGI(TAG, "Scan params transferred: x_size=%d, y_size=%d, x_offset=%d, y_offset=%d, rate=%d, samples=%d, lines=%d", scan_params_transfer.scan_x_size, scan_params_transfer.scan_y_size, scan_params_transfer.scan_x_offset, scan_params_transfer.scan_y_offset, scan_params_transfer.scan_rate, scan_params_transfer.scan_samples, scan_params_transfer.scan_lines);
 
     
 
@@ -674,6 +685,15 @@ static esp_err_t scan_toggle_handler(httpd_req_t *req)
             scan_data[1][i] = (float)rand() / RAND_MAX;
         }
     }
+    //Set up a transaction of 128 bytes to send/receive
+    scan_params_transfer.is_scanning = scanning ? 1 : 0;
+    scan_params_transfer.address = ADDR_SCAN_ONOFF;
+    
+    t.length = sizeof(scan_params_transfer) * 8;
+    t.tx_buffer = (uint8_t *)&scan_params_transfer;
+
+    spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+
     ESP_LOGI(TAG, "Scanning %s", scanning ? "started" : "stopped");
     return httpd_resp_sendstr(req, "ok");
 }
@@ -696,6 +716,15 @@ static esp_err_t set_direction_handler(httpd_req_t *req)
         scan_direction_upward = false;
         ESP_LOGI(TAG, "Scan direction: Downward");
     }
+
+    scan_params_transfer.scan_direction = scan_direction_upward ? 1 : 0;
+    scan_params_transfer.address = ADDR_SCAN_DIRECTION;
+
+    t.length = sizeof(scan_params_transfer) * 8;
+    t.tx_buffer = (uint8_t *)&scan_params_transfer;
+
+    spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+
     return httpd_resp_sendstr(req, "ok");
 }
 
@@ -941,6 +970,7 @@ void app_main(void)
 
     stepper_gpio_init();
     spi_slave_init();
+    scan_params_transfer.is_scanning = 0;
 
     const esp_timer_create_args_t timer_args = {
         .callback = &step_timer_cb,
