@@ -10,6 +10,11 @@
 #include <limits.h>
 #include <math.h>
 
+#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -23,6 +28,7 @@
 #include "esp_http_server.h"
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"
+#include "driver/spi_slave.h"
 
 #define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
 #define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
@@ -34,11 +40,21 @@
 #else
 #define EXAMPLE_GTK_REKEY_INTERVAL 0
 #endif
-
+/* GPIO Definitions for Stepper Motor */
 #define GPIO_STEP   5
 #define GPIO_DIR    6
 #define GPIO_ENABLE 10
 #define GPIO_MOTOR_EN 10
+
+/* SPI Host for RCV */
+#define RCV_HOST    SPI2_HOST
+
+#define GPIO_HANDSHAKE      7
+#define GPIO_MOSI           12
+#define GPIO_MISO           13
+#define GPIO_SCLK           15
+#define GPIO_CS             14
+
 
 #define MIN_SPEED_HZ 200
 #define MAX_SPEED_HZ 10000
@@ -100,8 +116,8 @@ static float scan_y_size = 10.0f;
 static float scan_x_offset = 0.0f;
 static float scan_y_offset = 0.0f;
 static float scan_rate = 1.0f;
-static int scan_samples = 256;
-static int scan_lines = 256;
+static int scan_samples = 250;
+static int scan_lines = 250;
 static bool scanning = false;
 static bool scan_direction_upward = false; // true: upward (from max to 0), false: downward (from 0 to max)
 static int current_scan_line = 0;
@@ -112,6 +128,25 @@ static esp_timer_handle_t s_step_timer;
 static portMUX_TYPE s_state_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_cmd_queue;
 static volatile bool s_step_level = false;
+
+
+
+// SPI varibles
+char *sendbuf;
+char *recvbuf;
+spi_slave_transaction_t t = {0};
+
+
+struct {
+    uint16_t    scan_x_size;
+    uint16_t    scan_y_size;
+    uint16_t    scan_x_offset;
+    uint16_t    scan_y_offset;
+    uint16_t    scan_rate;
+    uint16_t    scan_samples;
+    uint16_t    scan_lines;
+} scan_params_transfer;
+
 
 static const char *INDEX_HTML =
     "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Stepper Control & AFM Scan</title>"
@@ -139,8 +174,8 @@ static const char *INDEX_HTML =
     "<label>X Offset (um)</label><input id='x_offset' type='number' min='0' max='30' step='0.1' value='0'>"
     "<label>Y Offset (um)</label><input id='y_offset' type='number' min='0' max='30' step='0.1' value='0'>"
     "<label>Scan Rate (Hz)</label><input id='scan_rate' type='number' min='0' max='10' step='0.1' value='1.0'>"
-    "<label>Samples (0-1024)</label><input id='samples' type='number' min='0' max='1024' value='256'>"
-    "<label>Lines (0-1024)</label><input id='lines' type='number' min='0' max='1024' value='256'>"
+    "<label>Samples (0-1024)</label><input id='samples' type='number' min='0' max='1024' value='250'>"
+    "<label>Lines (0-1024)</label><input id='lines' type='number' min='0' max='1024' value='250'>"
     "<button onclick='updateScanParams()'>Update</button></section>"
     "<section><button id='scanBtn' onclick='toggleScan()' class='secondary'>Scan Start</button>"
     "<button onclick='setDirection(true)'>Upward</button><button onclick='setDirection(false)'>Downward</button></section>"
@@ -231,6 +266,19 @@ static const char *INDEX_HTML =
     "function updateStatus(scanning, direction, line){document.getElementById('statusBar').innerText=`Scanning: ${scanning?'Started':'Stopped'} | Direction: ${direction?'Upward':'Downward'} | Current Line: ${line}`;}"
     "setUpdateInterval(1);updateDisplay();"
     "</script></body></html>";
+
+//Called after a transaction is queued and ready for pickup by master. We use this to set the handshake line high.
+void my_post_setup_cb(spi_slave_transaction_t *trans)
+{
+    gpio_set_level(GPIO_HANDSHAKE, 1);
+}
+
+//Called after transaction is sent/received. We use this to set the handshake line low.
+void my_post_trans_cb(spi_slave_transaction_t *trans)
+{
+    gpio_set_level(GPIO_HANDSHAKE, 0);
+}
+
 
 static void set_direction(int dir)
 {
@@ -574,8 +622,8 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     if (x_off < 0 || x_off > 30) x_off = 0.0f;
     if (y_off < 0 || y_off > 30) y_off = 0.0f;
     if (rate < 0 || rate > 10) rate = 1.0f;
-    if (samp < 0 || samp > 1024) samp = 256;
-    if (lin < 0 || lin > 1024) lin = 256;
+    if (samp < 0 || samp > 1024) samp = 250;
+    if (lin < 0 || lin > 1024) lin = 250;
     scan_x_size = x_size;
     scan_y_size = y_size;
     scan_x_offset = x_off;
@@ -583,7 +631,30 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     scan_rate = rate;
     scan_samples = samp;
     scan_lines = lin;
+
+    scan_params_transfer.scan_x_size = (uint16_t)(scan_x_size * 1000.0); // convert to nm for transfer
+    scan_params_transfer.scan_y_size = (uint16_t)(scan_y_size * 1000.0);
+    scan_params_transfer.scan_x_offset = (uint16_t)(scan_x_offset * 1000.0);
+    scan_params_transfer.scan_y_offset = (uint16_t)(scan_y_offset * 1000.0);
+    scan_params_transfer.scan_rate = (uint16_t)(scan_rate * 10.0);
+    scan_params_transfer.scan_samples = (uint16_t)(scan_samples);
+    scan_params_transfer.scan_lines = (uint16_t)(scan_lines);
+    
+    ESP_LOGI(TAG, "Scan params transferred: x_size=%d, y_size=%d, x_offset=%d, y_offset=%d, rate=%d, samples=%d, lines=%d", scan_params_transfer.scan_x_size, scan_params_transfer.scan_y_size, scan_params_transfer.scan_x_offset, scan_params_transfer.scan_y_offset, scan_params_transfer.scan_rate, scan_params_transfer.scan_samples, scan_params_transfer.scan_lines);
+
+    
+
+    //Set up a transaction of 128 bytes to send/receive
+    t.length = sizeof(scan_params_transfer) * 8;
+    t.tx_buffer = (uint8_t *)&scan_params_transfer;
+
+    spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+
+
     ESP_LOGI(TAG, "Scan params updated: x_size=%.1f, y_size=%.1f, x_offset=%.1f, y_offset=%.1f, rate=%.1f, samples=%d, lines=%d", scan_x_size, scan_y_size, scan_x_offset, scan_y_offset, scan_rate, scan_samples, scan_lines);
+
+    
+
     return httpd_resp_sendstr(req, "ok");
 }
 
@@ -811,6 +882,54 @@ static void scan_task(void *arg)
     }
 }
 
+
+void spi_slave_init(void)
+{
+    esp_err_t ret;
+
+    //Configuration for the SPI bus
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = GPIO_MOSI,
+        .miso_io_num = GPIO_MISO,
+        .sclk_io_num = GPIO_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+    };
+
+    //Configuration for the SPI slave interface
+    spi_slave_interface_config_t slvcfg = {
+        .mode = 0,
+        .spics_io_num = GPIO_CS,
+        .queue_size = 3,
+        .flags = 0,
+        .post_setup_cb = my_post_setup_cb,
+        .post_trans_cb = my_post_trans_cb
+    };
+
+    //Configuration for the handshake line
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = BIT64(GPIO_HANDSHAKE),
+    };
+
+    //Configure handshake line as output
+    gpio_config(&io_conf);
+    //Enable pull-ups on SPI lines so we don't detect rogue pulses when no master is connected.
+    gpio_set_pull_mode(GPIO_MOSI, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
+
+    //Initialize SPI slave interface
+    ret = spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, SPI_DMA_CH_AUTO);
+    assert(ret == ESP_OK);
+
+    sendbuf = spi_bus_dma_memory_alloc(RCV_HOST, 129, 0);
+    recvbuf = spi_bus_dma_memory_alloc(RCV_HOST, 129, 0);
+
+
+}
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -821,6 +940,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     stepper_gpio_init();
+    spi_slave_init();
 
     const esp_timer_create_args_t timer_args = {
         .callback = &step_timer_cb,
