@@ -55,6 +55,8 @@
 #define GPIO_SCLK           15
 #define GPIO_CS             14
 
+#define GPIO_SCANDATA_READY  9
+
 
 #define MIN_SPEED_HZ 200
 #define MAX_SPEED_HZ 10000
@@ -137,12 +139,15 @@ static QueueHandle_t s_cmd_queue;
 static volatile bool s_step_level = false;
 
 
+//EXT_RAM_BSS_ATTR uint16_t line_rx_buf[1000];
+//EXT_RAM_BSS_ATTR uint16_t line_tx_buf[1000];
 
 // SPI varibles
 char *sendbuf;
 char *recvbuf;
 spi_slave_transaction_t t = {0};
 
+volatile bool spi_request = false;
 
 struct {
     uint16_t    address;
@@ -157,6 +162,9 @@ struct {
     uint8_t     scan_direction; // 0 for downward, 1 for upward
     } scan_params_transfer;
 
+
+//The semaphore indicating the scan data is ready to transfer.
+static QueueHandle_t scan_rdy_sem;
 
 static const char *INDEX_HTML =
     "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Stepper Control & AFM Scan</title>"
@@ -280,7 +288,8 @@ static const char *INDEX_HTML =
 //Called after a transaction is queued and ready for pickup by master. We use this to set the handshake line high.
 void my_post_setup_cb(spi_slave_transaction_t *trans)
 {
-    gpio_set_level(GPIO_HANDSHAKE, 1);
+    if(spi_request)
+        gpio_set_level(GPIO_HANDSHAKE, 1);
 }
 
 //Called after transaction is sent/received. We use this to set the handshake line low.
@@ -658,8 +667,8 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     //Set up a transaction of 128 bytes to send/receive
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
-
-    spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+    spi_request = true; // set flag to indicate new data is ready for transfer
+    spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
 
 
     ESP_LOGI(TAG, "Scan params updated: x_size=%.1f, y_size=%.1f, x_offset=%.1f, y_offset=%.1f, rate=%.1f, samples=%d, lines=%d", scan_x_size, scan_y_size, scan_x_offset, scan_y_offset, scan_rate, scan_samples, scan_lines);
@@ -691,8 +700,8 @@ static esp_err_t scan_toggle_handler(httpd_req_t *req)
     
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
-
-    spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+    spi_request = true; // set flag to indicate new data is ready for transfer
+    spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
 
     ESP_LOGI(TAG, "Scanning %s", scanning ? "started" : "stopped");
     return httpd_resp_sendstr(req, "ok");
@@ -722,8 +731,8 @@ static esp_err_t set_direction_handler(httpd_req_t *req)
 
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
-
-    spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+    spi_request = true; // set flag to indicate new data is ready for transfer
+    spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
 
     return httpd_resp_sendstr(req, "ok");
 }
@@ -879,17 +888,32 @@ static void stepper_gpio_init(void)
     gpio_set_level(GPIO_ENABLE, 1); // disable by default (assuming low-enable)
     gpio_set_level(GPIO_MOTOR_EN, 0); // motor disabled by default (high = enable)
 }
-
+uint16_t * line_rx_buf; // buffer for receiving scan line data from master
 static void scan_task(void *arg)
 {
+    line_rx_buf = spi_bus_dma_memory_alloc(RCV_HOST, 2000, 0);
+    
+    //uint16_t line_rx_buf[1000];
     while (1) {
-        if (scanning) {
-            // Generate data for current line
-            for (int i = 0; i < scan_samples; i++) {
-                scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
-            }
-            ESP_LOGI(TAG, "Scan line %d completed", current_scan_line);
 
+        xSemaphoreTake(scan_rdy_sem, portMAX_DELAY); //Wait until slave is ready
+        t.length = 1000 * 2 * 8;
+        t.tx_buffer = (uint8_t *)line_rx_buf;
+        t.rx_buffer = (uint8_t *)line_rx_buf;
+        spi_request = false; // set flag to indicate new data is ready for transfer
+        spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+            
+        //Generate data for current line
+        for (int i = 0; i < scan_samples; i++) {
+            scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
+        }
+        if(gpio_get_level(GPIO_SCANDATA_READY)) {
+            ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
+
+        }
+        else{
+
+            ESP_LOGI(TAG, "R: Scan line %d completed", current_scan_line);
             // Update current line
             if (scan_direction_upward) {
                 current_scan_line--;
@@ -906,9 +930,46 @@ static void scan_task(void *arg)
                     frame_completed = true;
                 }
             }
+
         }
-        vTaskDelay(pdMS_TO_TICKS(1000 / scan_rate)); // delay based on scan rate
+        //ESP_LOGI(TAG, "Scan line %d completed", current_scan_line);
+
+        
     }
+}
+
+
+/*
+This ISR is called when the scan data is ready to transfer.
+*/
+static void IRAM_ATTR gpio_scandata_ready_isr_handler(void* arg)
+{
+    //Sometimes due to interference or ringing or something, we get two irqs after each other. This is solved by
+    //looking at the time between interrupts and refusing any interrupt too close to another one.
+    // static uint32_t lastrdytime_us;
+    // uint32_t currtime_us = esp_timer_get_time();
+    // uint32_t diff = currtime_us - lastrdytime_us;
+    // if (diff < 1000) {
+    //     return; //ignore everything <1ms after an earlier irq
+    // }
+    // lastrdytime_us = currtime_us;
+
+    // //Give the semaphore.
+    // BaseType_t mustYield = false;
+    // xSemaphoreGiveFromISR(scan_rdy_sem, &mustYield);
+    // if (mustYield) {
+    //     portYIELD_FROM_ISR();
+    // }
+
+    //ESP_LOGI(TAG, "Scan data ready interrupt triggered\n");
+    //if(gpio_get_level(GPIO_SCANDATA_READY)) {
+        BaseType_t mustYield = false;
+        xSemaphoreGiveFromISR(scan_rdy_sem, &mustYield);
+        if (mustYield) {
+            portYIELD_FROM_ISR();
+        }
+    //}
+
 }
 
 
@@ -942,6 +1003,8 @@ void spi_slave_init(void)
         .pin_bit_mask = BIT64(GPIO_HANDSHAKE),
     };
 
+    
+
     //Configure handshake line as output
     gpio_config(&io_conf);
     //Enable pull-ups on SPI lines so we don't detect rogue pulses when no master is connected.
@@ -955,6 +1018,27 @@ void spi_slave_init(void)
 
     sendbuf = spi_bus_dma_memory_alloc(RCV_HOST, 129, 0);
     recvbuf = spi_bus_dma_memory_alloc(RCV_HOST, 129, 0);
+
+    //GPIO config for the scandata ready line.
+    gpio_config_t io_conf_srdy = {
+        .intr_type = GPIO_INTR_ANYEDGE,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
+        .pin_bit_mask = BIT64(GPIO_SCANDATA_READY),
+    };
+
+
+    //Create the semaphore.
+    scan_rdy_sem = xSemaphoreCreateBinary();
+
+    //Set up scandata ready line interrupt.
+    gpio_config(&io_conf_srdy);
+    gpio_install_isr_service(0);
+    gpio_set_intr_type(GPIO_SCANDATA_READY, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(GPIO_SCANDATA_READY, gpio_scandata_ready_isr_handler, NULL);
+
+    //generate an semaphore manually.
+    //xSemaphoreGive(scan_rdy_sem);
 
 
 }
