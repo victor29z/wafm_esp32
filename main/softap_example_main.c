@@ -668,7 +668,8 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
     spi_request = true; // set flag to indicate new data is ready for transfer
-    spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+    //spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+    spi_slave_queue_trans(RCV_HOST, &t, 500);
 
 
     ESP_LOGI(TAG, "Scan params updated: x_size=%.1f, y_size=%.1f, x_offset=%.1f, y_offset=%.1f, rate=%.1f, samples=%d, lines=%d", scan_x_size, scan_y_size, scan_x_offset, scan_y_offset, scan_rate, scan_samples, scan_lines);
@@ -701,7 +702,7 @@ static esp_err_t scan_toggle_handler(httpd_req_t *req)
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
     spi_request = true; // set flag to indicate new data is ready for transfer
-    spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+    spi_slave_queue_trans(RCV_HOST, &t, 500);
 
     ESP_LOGI(TAG, "Scanning %s", scanning ? "started" : "stopped");
     return httpd_resp_sendstr(req, "ok");
@@ -732,7 +733,7 @@ static esp_err_t set_direction_handler(httpd_req_t *req)
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
     spi_request = true; // set flag to indicate new data is ready for transfer
-    spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+    spi_slave_queue_trans(RCV_HOST, &t, 500);
 
     return httpd_resp_sendstr(req, "ok");
 }
@@ -897,11 +898,11 @@ static void scan_task(void *arg)
     while (1) {
 
         xSemaphoreTake(scan_rdy_sem, portMAX_DELAY); //Wait until slave is ready
-        t.length = 1000 * 2 * 8;
+        t.length = 100 * 2 * 8;
         t.tx_buffer = (uint8_t *)line_rx_buf;
         t.rx_buffer = (uint8_t *)line_rx_buf;
         spi_request = false; // set flag to indicate new data is ready for transfer
-        spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+        //spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
             
         //Generate data for current line
         for (int i = 0; i < scan_samples; i++) {
