@@ -50,7 +50,7 @@
 #define RCV_HOST    SPI2_HOST
 
 #define GPIO_HANDSHAKE      21
-#define GPIO_SCANDATA_REQ   35
+#define GPIO_SCANDATA_REQ   42
 
 #define GPIO_MOSI           12
 #define GPIO_MISO           13
@@ -72,6 +72,7 @@
 #define ADDR_SCAN_PARAMS    0x0001
 #define ADDR_SCAN_ONOFF     0x0002
 #define ADDR_SCAN_DIRECTION 0x0003
+#define ADDR_SCAN_DATA       0x0004
 
 
 
@@ -149,7 +150,8 @@ char *sendbuf;
 char *recvbuf;
 spi_slave_transaction_t t = {0};
 
-volatile bool spi_request = false;  //true for param or cmd transfer, false for scan data transfer  
+volatile bool spi_param_request = false;   
+volatile bool spi_data_request = false; 
 
 struct {
     uint16_t    address;
@@ -290,14 +292,18 @@ static const char *INDEX_HTML =
 //Called after a transaction is queued and ready for pickup by master. We use this to set the handshake line high.
 void my_post_setup_cb(spi_slave_transaction_t *trans)
 {
-    if(spi_request){
-        gpio_set_level(GPIO_HANDSHAKE, 1);
-        spi_request = false; // reset flag until next data is ready
-
+    if(spi_data_request){
+        gpio_set_level(GPIO_SCANDATA_REQ, 1); // Signal master that scan data is ready for pickup
+        spi_data_request = false; // reset flag until next data is ready
+        return;
     }
-    // else{
-    //     gpio_set_level(GPIO_SCANDATA_REQ, 1); // Signal master that scan data is ready for pickup
-    // }
+    
+    if(spi_param_request){
+        gpio_set_level(GPIO_HANDSHAKE, 1);
+        spi_param_request = false; // reset flag until next data is ready
+        return;
+    }
+    
         
 }
 
@@ -680,7 +686,7 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     //Set up a transaction of 128 bytes to send/receive
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
-    spi_request = true; // set flag to indicate new data is ready for transfer
+    spi_param_request = true; // set flag to indicate new data is ready for transfer
 
     //spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
     esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
@@ -724,16 +730,16 @@ static esp_err_t scan_toggle_handler(httpd_req_t *req)
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
     t.rx_buffer = (uint8_t *)spi_rx_buf; // Optional: receive any response from master
-    spi_request = true; // set flag to indicate new data is ready for transfer
+    spi_param_request = true; // set flag to indicate new data is ready for transfer
     esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to transmit scan toggle cmd: %s", esp_err_to_name(err) );
     }
-    // printf("SPI response: \n"); // For debugging, print any response from master  
-    // for (int i = 0; i < t.length / 8 && i < sizeof(spi_rx_buf); i++) {
-    //     printf("%02X ", spi_rx_buf[i]);
-    // }
-    // printf("\n");   
+    printf("SPI response: \n"); // For debugging, print any response from master  
+    for (int i = 0; i < t.length / 8 && i < sizeof(spi_rx_buf); i++) {
+        printf("%02X ", spi_rx_buf[i]);
+    }
+    printf("\n");   
 
     ESP_LOGI(TAG, "Scanning %s", scanning ? "started" : "stopped");
     return httpd_resp_sendstr(req, "ok");
@@ -765,7 +771,7 @@ static esp_err_t set_direction_handler(httpd_req_t *req)
 
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
-    spi_request = true; // set flag to indicate new data is ready for transfer
+    spi_param_request = true; // set flag to indicate new data is ready for transfer
     esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to transmit scan direction cmd: %s", esp_err_to_name(err) );
@@ -934,24 +940,53 @@ static void scan_task(void *arg)
     while (1) {
         if(scanning){
             xSemaphoreTake(scan_rdy_sem, portMAX_DELAY); //Wait until slave is ready
-            t.length = 1000 * 2 * 8;
-            t.tx_buffer = NULL;
-            t.rx_buffer = (uint8_t *)line_rx_buf;
-            spi_request = false; // set flag to indicate new data is ready for transfer
-            // spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
-            // spi_slave_transaction_t *ret_trans;
-            // spi_slave_get_trans_result(RCV_HOST, &ret_trans, portMAX_DELAY);
+            // spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
+            // gpio_set_level(GPIO_SCANDATA_REQ, 0);
+            // t.length = 10 * 2 * 8;
+            // t.tx_buffer = (uint8_t *)line_rx_buf;
+            // t.rx_buffer = (uint8_t *)line_rx_buf;
+            
+
+            // spi_data_request = true; // set flag to indicate new data is ready for transfer
+            // // spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+            // // spi_slave_transaction_t *ret_trans;
+            // // spi_slave_get_trans_result(RCV_HOST, &ret_trans, portMAX_DELAY);
 
           
-            // esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
+            // esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 200);
             // if (err != ESP_OK) {
             //     ESP_LOGE(TAG, "Failed to get scan data: %s", esp_err_to_name(err) );
             // }
+            char spi_rx_buf[128] = {0};
+
+            scan_params_transfer.address = ADDR_SCAN_DATA;
+            spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
+            gpio_set_level(GPIO_HANDSHAKE, 0);
+
+
+            t.length = sizeof(scan_params_transfer) * 8;
+            t.tx_buffer = (uint8_t *)&scan_params_transfer;
+            t.rx_buffer = (uint8_t *)spi_rx_buf; // Optional: receive any response from master
+            spi_data_request = true; // set flag to indicate new data is ready for transfer
+            esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to get scan data: %s", esp_err_to_name(err) );
+            }
+            printf("SPI response: \n"); // For debugging, print any response from master  
+
+
+            for (int i = 0; i < t.length / 8 && i < sizeof(spi_rx_buf); i++) {
+                printf("%02X ", spi_rx_buf[i]);
+            }
+            printf("\n");   
         
             //Generate data for current line
             for (int i = 0; i < scan_samples; i++) {
-                scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
+                //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
+                scan_data[current_scan_line][i] = (float)line_rx_buf[i] / 4096;
+                //printf("0x%x ",line_rx_buf[i]);
             }
+            // printf("\n");
             if(gpio_get_level(GPIO_SCANDATA_READY)) {
                 ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
 
@@ -1052,13 +1087,18 @@ void spi_slave_init(void)
     gpio_config_t io_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = BIT64(GPIO_HANDSHAKE),
+        .pin_bit_mask = BIT64(GPIO_HANDSHAKE )  ,
     };
 
     
 
     //Configure handshake line as output
     gpio_config(&io_conf);
+
+    io_conf.pin_bit_mask = BIT64(GPIO_SCANDATA_REQ); 
+    gpio_config(&io_conf);
+
+    
     //Enable pull-ups on SPI lines so we don't detect rogue pulses when no master is connected.
     gpio_set_pull_mode(GPIO_MOSI, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
