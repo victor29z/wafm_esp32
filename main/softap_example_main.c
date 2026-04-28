@@ -49,7 +49,9 @@
 /* SPI Host for RCV */
 #define RCV_HOST    SPI2_HOST
 
-#define GPIO_HANDSHAKE      7
+#define GPIO_HANDSHAKE      21
+#define GPIO_SCANDATA_REQ   35
+
 #define GPIO_MOSI           12
 #define GPIO_MISO           13
 #define GPIO_SCLK           15
@@ -147,7 +149,7 @@ char *sendbuf;
 char *recvbuf;
 spi_slave_transaction_t t = {0};
 
-volatile bool spi_request = false;
+volatile bool spi_request = false;  //true for param or cmd transfer, false for scan data transfer  
 
 struct {
     uint16_t    address;
@@ -158,8 +160,8 @@ struct {
     uint16_t    scan_rate;
     uint16_t    scan_samples;
     uint16_t    scan_lines;
-    uint8_t     is_scanning; // 0 for stopped, 1 for scanning
-    uint8_t     scan_direction; // 0 for downward, 1 for upward
+    uint16_t     is_scanning; // 0 for stopped, 1 for scanning
+    uint16_t     scan_direction; // 0 for downward, 1 for upward
     } scan_params_transfer;
 
 
@@ -288,14 +290,22 @@ static const char *INDEX_HTML =
 //Called after a transaction is queued and ready for pickup by master. We use this to set the handshake line high.
 void my_post_setup_cb(spi_slave_transaction_t *trans)
 {
-    if(spi_request)
+    if(spi_request){
         gpio_set_level(GPIO_HANDSHAKE, 1);
+        spi_request = false; // reset flag until next data is ready
+
+    }
+    // else{
+    //     gpio_set_level(GPIO_SCANDATA_REQ, 1); // Signal master that scan data is ready for pickup
+    // }
+        
 }
 
 //Called after transaction is sent/received. We use this to set the handshake line low.
 void my_post_trans_cb(spi_slave_transaction_t *trans)
 {
     gpio_set_level(GPIO_HANDSHAKE, 0);
+    gpio_set_level(GPIO_SCANDATA_REQ, 0);
 }
 
 
@@ -663,13 +673,20 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
     // ESP_LOGI(TAG, "Scan params transferred: x_size=%d, y_size=%d, x_offset=%d, y_offset=%d, rate=%d, samples=%d, lines=%d", scan_params_transfer.scan_x_size, scan_params_transfer.scan_y_size, scan_params_transfer.scan_x_offset, scan_params_transfer.scan_y_offset, scan_params_transfer.scan_rate, scan_params_transfer.scan_samples, scan_params_transfer.scan_lines);
 
     
+    spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
+    gpio_set_level(GPIO_HANDSHAKE, 0);
+
 
     //Set up a transaction of 128 bytes to send/receive
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
     spi_request = true; // set flag to indicate new data is ready for transfer
+
     //spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
-    spi_slave_queue_trans(RCV_HOST, &t, 500);
+    esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to transmit scan params: %s", esp_err_to_name(err) );
+    } 
 
 
     ESP_LOGI(TAG, "Scan params updated: x_size=%.1f, y_size=%.1f, x_offset=%.1f, y_offset=%.1f, rate=%.1f, samples=%d, lines=%d", scan_x_size, scan_y_size, scan_x_offset, scan_y_offset, scan_rate, scan_samples, scan_lines);
@@ -681,6 +698,7 @@ static esp_err_t update_scan_handler(httpd_req_t *req)
 
 static esp_err_t scan_toggle_handler(httpd_req_t *req)
 {
+    char spi_rx_buf[128] = {0};
     scanning = !scanning;
     if (scanning) {
         if (scan_direction_upward) {
@@ -699,10 +717,23 @@ static esp_err_t scan_toggle_handler(httpd_req_t *req)
     scan_params_transfer.is_scanning = scanning ? 1 : 0;
     scan_params_transfer.address = ADDR_SCAN_ONOFF;
     
+    spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
+    gpio_set_level(GPIO_HANDSHAKE, 0);
+
+
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
+    t.rx_buffer = (uint8_t *)spi_rx_buf; // Optional: receive any response from master
     spi_request = true; // set flag to indicate new data is ready for transfer
-    spi_slave_queue_trans(RCV_HOST, &t, 500);
+    esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to transmit scan toggle cmd: %s", esp_err_to_name(err) );
+    }
+    // printf("SPI response: \n"); // For debugging, print any response from master  
+    // for (int i = 0; i < t.length / 8 && i < sizeof(spi_rx_buf); i++) {
+    //     printf("%02X ", spi_rx_buf[i]);
+    // }
+    // printf("\n");   
 
     ESP_LOGI(TAG, "Scanning %s", scanning ? "started" : "stopped");
     return httpd_resp_sendstr(req, "ok");
@@ -729,11 +760,16 @@ static esp_err_t set_direction_handler(httpd_req_t *req)
 
     scan_params_transfer.scan_direction = scan_direction_upward ? 1 : 0;
     scan_params_transfer.address = ADDR_SCAN_DIRECTION;
+    gpio_set_level(GPIO_HANDSHAKE, 0);
+
 
     t.length = sizeof(scan_params_transfer) * 8;
     t.tx_buffer = (uint8_t *)&scan_params_transfer;
     spi_request = true; // set flag to indicate new data is ready for transfer
-    spi_slave_queue_trans(RCV_HOST, &t, 500);
+    esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to transmit scan direction cmd: %s", esp_err_to_name(err) );
+    }
 
     return httpd_resp_sendstr(req, "ok");
 }
@@ -896,44 +932,59 @@ static void scan_task(void *arg)
     
     //uint16_t line_rx_buf[1000];
     while (1) {
+        if(scanning){
+            xSemaphoreTake(scan_rdy_sem, portMAX_DELAY); //Wait until slave is ready
+            t.length = 1000 * 2 * 8;
+            t.tx_buffer = NULL;
+            t.rx_buffer = (uint8_t *)line_rx_buf;
+            spi_request = false; // set flag to indicate new data is ready for transfer
+            // spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
+            // spi_slave_transaction_t *ret_trans;
+            // spi_slave_get_trans_result(RCV_HOST, &ret_trans, portMAX_DELAY);
 
-        xSemaphoreTake(scan_rdy_sem, portMAX_DELAY); //Wait until slave is ready
-        t.length = 100 * 2 * 8;
-        t.tx_buffer = (uint8_t *)line_rx_buf;
-        t.rx_buffer = (uint8_t *)line_rx_buf;
-        spi_request = false; // set flag to indicate new data is ready for transfer
-        //spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
-            
-        //Generate data for current line
-        for (int i = 0; i < scan_samples; i++) {
-            scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
-        }
-        if(gpio_get_level(GPIO_SCANDATA_READY)) {
-            ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
+          
+            // esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
+            // if (err != ESP_OK) {
+            //     ESP_LOGE(TAG, "Failed to get scan data: %s", esp_err_to_name(err) );
+            // }
+        
+            //Generate data for current line
+            for (int i = 0; i < scan_samples; i++) {
+                scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
+            }
+            if(gpio_get_level(GPIO_SCANDATA_READY)) {
+                ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
+
+            }
+            else{
+
+                ESP_LOGI(TAG, "R: Scan line %d completed", current_scan_line);
+                // Update current line
+                if (scan_direction_upward) {
+                    current_scan_line--;
+                    if (current_scan_line < 0) {
+                        current_scan_line = 0;
+                        scan_direction_upward = false; // switch to downward
+                        frame_completed = true;
+                    }
+                } else {
+                    current_scan_line++;
+                    if (current_scan_line >= scan_lines) {
+                        current_scan_line = scan_lines - 1;
+                        scan_direction_upward = true; // switch to upward
+                        frame_completed = true;
+                    }
+                }
+
+            }
+            //ESP_LOGI(TAG, "Scan line %d completed", current_scan_line);
 
         }
         else{
-
-            ESP_LOGI(TAG, "R: Scan line %d completed", current_scan_line);
-            // Update current line
-            if (scan_direction_upward) {
-                current_scan_line--;
-                if (current_scan_line < 0) {
-                    current_scan_line = 0;
-                    scan_direction_upward = false; // switch to downward
-                    frame_completed = true;
-                }
-            } else {
-                current_scan_line++;
-                if (current_scan_line >= scan_lines) {
-                    current_scan_line = scan_lines - 1;
-                    scan_direction_upward = true; // switch to upward
-                    frame_completed = true;
-                }
-            }
-
+            vTaskDelay(pdMS_TO_TICKS(50)); // sleep when not scanning
         }
-        //ESP_LOGI(TAG, "Scan line %d completed", current_scan_line);
+
+        
 
         
     }
