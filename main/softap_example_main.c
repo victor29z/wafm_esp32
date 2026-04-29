@@ -957,15 +957,15 @@ static void scan_task(void *arg)
             // if (err != ESP_OK) {
             //     ESP_LOGE(TAG, "Failed to get scan data: %s", esp_err_to_name(err) );
             // }
-            char spi_rx_buf[128] = {0};
+            uint16_t spi_rx_buf[1000] = {0};
 
             scan_params_transfer.address = ADDR_SCAN_DATA;
             spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
             gpio_set_level(GPIO_HANDSHAKE, 0);
+            printf("Requesting scan data length = %d...\n", 2000);
 
-
-            t.length = sizeof(scan_params_transfer) * 8;
-            t.tx_buffer = (uint8_t *)&scan_params_transfer;
+            t.length = 2000 * 8;
+            t.tx_buffer = (uint8_t *)spi_rx_buf;
             t.rx_buffer = (uint8_t *)spi_rx_buf; // Optional: receive any response from master
             spi_data_request = true; // set flag to indicate new data is ready for transfer
             esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
@@ -975,8 +975,8 @@ static void scan_task(void *arg)
             printf("SPI response: \n"); // For debugging, print any response from master  
 
 
-            for (int i = 0; i < t.length / 8 && i < sizeof(spi_rx_buf); i++) {
-                printf("%02X ", spi_rx_buf[i]);
+            for (uint16_t i = 0; i < 1000 ; i++) {
+                printf("%x ", spi_rx_buf[i]);
             }
             printf("\n");   
         
