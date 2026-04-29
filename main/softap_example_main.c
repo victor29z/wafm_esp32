@@ -152,6 +152,7 @@ spi_slave_transaction_t t = {0};
 
 volatile bool spi_param_request = false;   
 volatile bool spi_data_request = false; 
+uint16_t * line_rx_buf; // buffer for receiving scan line data from master
 
 struct {
     uint16_t    address;
@@ -931,46 +932,47 @@ static void stepper_gpio_init(void)
     gpio_set_level(GPIO_ENABLE, 1); // disable by default (assuming low-enable)
     gpio_set_level(GPIO_MOTOR_EN, 0); // motor disabled by default (high = enable)
 }
-uint16_t * line_rx_buf; // buffer for receiving scan line data from master
 static void scan_task(void *arg)
 {
-    line_rx_buf = spi_bus_dma_memory_alloc(RCV_HOST, 2000, 0);
+    //line_rx_buf = spi_bus_dma_memory_alloc(RCV_HOST, 2000, 0);
+    //line_rx_buf = heap_caps_malloc(2000, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    //line_rx_buf = heap_caps_aligned_alloc(4, 2000,    MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     
-    //uint16_t line_rx_buf[1000];
     while (1) {
         if(scanning){
             xSemaphoreTake(scan_rdy_sem, portMAX_DELAY); //Wait until slave is ready
 
-            uint16_t spi_rx_buf[1000] = {0};
+            //uint16_t spi_rx_buf[1000] = {0};
 
             scan_params_transfer.address = ADDR_SCAN_DATA;
             spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
             gpio_set_level(GPIO_HANDSHAKE, 0);
-            printf("Requesting scan data length = %d...\n", 2000);
+            memset((uint8_t *)line_rx_buf, 0, 2000);
+            // printf("Requesting scan data length = %d...\n", 2000);
 
             t.length = 2000 * 8;
-            t.tx_buffer = (uint8_t *)spi_rx_buf;
-            t.rx_buffer = (uint8_t *)spi_rx_buf; // Optional: receive any response from master
+            t.tx_buffer = (uint8_t *)line_rx_buf;
+            t.rx_buffer = (uint8_t *)line_rx_buf; // Optional: receive any response from master
             spi_data_request = true; // set flag to indicate new data is ready for transfer
             esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 1000);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to get scan data: %s", esp_err_to_name(err) );
             }
-            printf("SPI response: \n"); // For debugging, print any response from master  
+            // printf("SPI response: \n"); // For debugging, print any response from master  
 
 
-            for (uint16_t i = 0; i < 1000 ; i++) {
-                printf("%x ", spi_rx_buf[i]);
-            }
-            printf("\n");   
+            // for (uint16_t i = 0; i < 1000 ; i++) {
+            //     printf("%x ", spi_rx_buf[i]);
+            // }
+            // printf("\n");   
         
             //Generate data for current line
-            for (int i = 0; i < scan_samples; i++) {
+            for (int i = 0; i < 1000; i++) {
                 //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
                 scan_data[current_scan_line][i] = (float)line_rx_buf[i] / 4096;
-                //printf("0x%x ",line_rx_buf[i]);
+                printf("0x%x ",line_rx_buf[i]);
             }
-            // printf("\n");
+            printf("\n");
             if(gpio_get_level(GPIO_SCANDATA_READY)) {
                 ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
 
@@ -1055,13 +1057,14 @@ void spi_slave_init(void)
         .sclk_io_num = GPIO_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
+        .max_transfer_sz = 4096,  // >2KB
     };
 
     //Configuration for the SPI slave interface
     spi_slave_interface_config_t slvcfg = {
         .mode = 0,
         .spics_io_num = GPIO_CS,
-        .queue_size = 3,
+        .queue_size = 4,
         .flags = 0,
         .post_setup_cb = my_post_setup_cb,
         .post_trans_cb = my_post_trans_cb
@@ -1115,6 +1118,7 @@ void spi_slave_init(void)
 
     //generate an semaphore manually.
     //xSemaphoreGive(scan_rdy_sem);
+    line_rx_buf = heap_caps_aligned_alloc(4, 2000,    MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
 
 
 }
