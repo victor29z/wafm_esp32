@@ -940,23 +940,7 @@ static void scan_task(void *arg)
     while (1) {
         if(scanning){
             xSemaphoreTake(scan_rdy_sem, portMAX_DELAY); //Wait until slave is ready
-            // spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
-            // gpio_set_level(GPIO_SCANDATA_REQ, 0);
-            // t.length = 10 * 2 * 8;
-            // t.tx_buffer = (uint8_t *)line_rx_buf;
-            // t.rx_buffer = (uint8_t *)line_rx_buf;
-            
 
-            // spi_data_request = true; // set flag to indicate new data is ready for transfer
-            // // spi_slave_queue_trans(RCV_HOST, &t, portMAX_DELAY);
-            // // spi_slave_transaction_t *ret_trans;
-            // // spi_slave_get_trans_result(RCV_HOST, &ret_trans, portMAX_DELAY);
-
-          
-            // esp_err_t err = spi_slave_transmit(RCV_HOST, &t, 200);
-            // if (err != ESP_OK) {
-            //     ESP_LOGE(TAG, "Failed to get scan data: %s", esp_err_to_name(err) );
-            // }
             uint16_t spi_rx_buf[1000] = {0};
 
             scan_params_transfer.address = ADDR_SCAN_DATA;
