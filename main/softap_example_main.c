@@ -134,7 +134,9 @@ static bool scanning = false;
 static bool scan_direction_upward = false; // true: upward (from max to 0), false: downward (from 0 to max)
 static int current_scan_line = 0;
 static bool frame_completed = false;
-EXT_RAM_BSS_ATTR static float scan_data[MAX_LINES][MAX_SAMPLES]; // 1024x1024 float array in PSRAM
+EXT_RAM_BSS_ATTR static uint16_t scan_data_t[MAX_LINES][MAX_SAMPLES]; // 1024x1024 float array in PSRAM
+EXT_RAM_BSS_ATTR static uint16_t scan_data_r[MAX_LINES][MAX_SAMPLES]; // 1024x1024 float array in PSRAM
+
 
 static esp_timer_handle_t s_step_timer;
 static portMUX_TYPE s_state_spinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -715,10 +717,10 @@ static esp_err_t scan_toggle_handler(httpd_req_t *req)
         }
         frame_completed = false;
         // Initialize first two rows with random data
-        for (int i = 0; i < scan_samples; i++) {
-            scan_data[0][i] = (float)rand() / RAND_MAX;
-            scan_data[1][i] = (float)rand() / RAND_MAX;
-        }
+        // for (int i = 0; i < scan_samples; i++) {
+        //     scan_data[0][i] = (float)rand() / RAND_MAX;
+        //     scan_data[1][i] = (float)rand() / RAND_MAX;
+        // }
     }
     //Set up a transaction of 128 bytes to send/receive
     scan_params_transfer.is_scanning = scanning ? 1 : 0;
@@ -802,17 +804,17 @@ static esp_err_t get_scan_data_handler(httpd_req_t *req)
     p += sprintf(p, "{\"scanning\":%s,\"direction\":%s,\"current_line\":%d,\"samples\":%d,\"lines\":%d,\"scan_rate\":%.1f,\"frame_completed\":%s,\"row0\":[",
                 scanning ? "true" : "false", scan_direction_upward ? "true" : "false", current_scan_line, scan_samples, scan_lines, scan_rate, frame_completed ? "true" : "false");
     for (int x = 0; x < scan_samples; x++) {
-        p += sprintf(p, "%.3f", scan_data[current_scan_line][x]);
+        p += sprintf(p, "%.3f", scan_data_t[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
         if (x < scan_samples - 1) p += sprintf(p, ",");
     }
     p += sprintf(p, "],\"row1\":[");
     for (int x = 0; x < scan_samples; x++) {
-        p += sprintf(p, "%.3f", scan_data[adjacent_line][x]);
+        p += sprintf(p, "%.3f", scan_data_r[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
         if (x < scan_samples - 1) p += sprintf(p, ",");
     }
     p += sprintf(p, "],\"current_row\":[");
     for (int x = 0; x < scan_samples; x++) {
-        p += sprintf(p, "%.3f", scan_data[current_scan_line][x]);
+        p += sprintf(p, "%.3f", scan_data_t[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
         if (x < scan_samples - 1) p += sprintf(p, ",");
     }
     p += sprintf(p, "]}");
@@ -967,19 +969,28 @@ static void scan_task(void *arg)
             // printf("\n");   
         
             //Generate data for current line
-            for (int i = 0; i < 1000; i++) {
-                //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
-                scan_data[current_scan_line][i] = (float)line_rx_buf[i] / 4096;
-                printf("0x%x ",line_rx_buf[i]);
-            }
-            printf("\n");
+            
             if(gpio_get_level(GPIO_SCANDATA_READY)) {
                 ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
+
+                for (int i = 0; i < 1000; i++) {
+                    //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
+                    scan_data_t[current_scan_line][i] = line_rx_buf[i];
+                    printf("0x%x ",line_rx_buf[i]);
+                }
+                printf("\n");
 
             }
             else{
 
                 ESP_LOGI(TAG, "R: Scan line %d completed", current_scan_line);
+
+                for (int i = 0; i < 1000; i++) {
+                    //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
+                    scan_data_r[current_scan_line][i] = line_rx_buf[i];
+                    printf("0x%x ",line_rx_buf[i]);
+                }
+                printf("\n");
                 // Update current line
                 if (scan_direction_upward) {
                     current_scan_line--;
@@ -1152,7 +1163,8 @@ void app_main(void)
     // Initialize scan data with random values
     for (int y = 0; y < MAX_LINES; y++) {
         for (int x = 0; x < MAX_SAMPLES; x++) {
-            scan_data[y][x] = (float)rand() / RAND_MAX;
+            scan_data_t[y][x] = 0;
+            scan_data_r[y][x] = 0;
         }
     }
 
