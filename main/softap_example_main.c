@@ -134,6 +134,7 @@ static int scan_lines = 250;
 static bool scanning = false;
 static bool scan_direction_upward = false; // true: upward (from max to 0), false: downward (from 0 to max)
 static int current_scan_line = 0;
+static int ready_scan_line = 0;
 static bool frame_completed = false;
 EXT_RAM_BSS_ATTR static uint16_t scan_data_t[MAX_LINES][MAX_SAMPLES]; // 1024x1024 float array in PSRAM
 EXT_RAM_BSS_ATTR static uint16_t scan_data_r[MAX_LINES][MAX_SAMPLES]; // 1024x1024 float array in PSRAM
@@ -142,8 +143,10 @@ EXT_RAM_BSS_ATTR static uint16_t scan_data_r[MAX_LINES][MAX_SAMPLES]; // 1024x10
 static esp_timer_handle_t s_step_timer;
 static portMUX_TYPE s_state_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_cmd_queue;
-static volatile bool s_step_level = false;
+volatile bool s_step_level = false;
 
+
+volatile bool line_data_ready = false;   // Flag set by scanning task when a line of scan data is ready for pickup by web
 
 //EXT_RAM_BSS_ATTR uint16_t line_rx_buf[1000];
 //EXT_RAM_BSS_ATTR uint16_t line_tx_buf[1000];
@@ -242,13 +245,14 @@ static const char *INDEX_HTML =
     "}"
     "function updateDisplay(){"
     "fetch('/api/get_scan_data').then(r=>r.json()).then(data=>{"
+    "updateStatus(data.scanning, data.direction, data.current_line);"
+    "const targetRate = data.scanning ? 20 : 1;"
+    "setUpdateInterval(targetRate);"
+    "if(data.scanning){document.getElementById('scanBtn').innerText='Stop';document.getElementById('scanBtn').className='stop';}else{document.getElementById('scanBtn').innerText='Scan Start';document.getElementById('scanBtn').className='secondary';}"
+    "if(!data.ready){return;}"
     "if(data.frame_completed && document.getElementById('saveData').checked){if(confirm('Frame completed. Save data?')){downloadData(dataArray, data.lines, data.transferred_samples);}}"
     "updateBitmap(data, data.current_line, data.transferred_samples, data.lines);"
     "updateCurve(data.row0, data.row1, data.transferred_samples);"
-    "updateStatus(data.scanning, data.direction, data.current_line);"
-    "const targetRate = data.scanning && data.scan_rate > 0 ? data.scan_rate : 1;"
-    "setUpdateInterval(targetRate);"
-    "if(data.scanning){document.getElementById('scanBtn').innerText='Stop';document.getElementById('scanBtn').className='stop';}else{document.getElementById('scanBtn').innerText='Scan Start';document.getElementById('scanBtn').className='secondary';}"
     "}).catch(err=>console.error('scan update failed',err));}"
     "function downloadData(data, lines, samples){"
     "let txt='';for(let y=0;y<lines;y++){for(let x=0;x<samples;x++){txt+=data[y][x].toFixed(3);if(x<samples-1)txt+=' ';}txt+='\\n';}"
@@ -791,31 +795,40 @@ static esp_err_t set_direction_handler(httpd_req_t *req)
 
 static esp_err_t get_scan_data_handler(httpd_req_t *req)
 {
-    // int adjacent_line = current_scan_line;
-    // if (scan_direction_upward) {
-    //     if (current_scan_line + 1 < scan_lines) {
-    //         adjacent_line = current_scan_line + 1;
-    //     }
-    // } else {
-    //     if (current_scan_line - 1 >= 0) {
-    //         adjacent_line = current_scan_line - 1;
-    //     }
-    // }
-
     char *json_str = malloc(64 * 1024); // 64KB buffer
     if (!json_str) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
     }
+
+    int display_line = line_data_ready ? ready_scan_line : current_scan_line;
+
+    if (!line_data_ready) {
+        int len = sprintf(json_str,
+            "{\"ready\":false,\"scanning\":%s,\"direction\":%s,\"current_line\":%d,\"samples\":%d,\"transferred_samples\":%d,\"lines\":%d,\"scan_rate\":%.1f,\"frame_completed\":%s}",
+            scanning ? "true" : "false",
+            scan_direction_upward ? "true" : "false",
+            display_line,
+            scan_samples,
+            TRASNFERED_SAMPLES_PER_LINE,
+            scan_lines,
+            scan_rate,
+            frame_completed ? "true" : "false");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, json_str, len);
+        free(json_str);
+        return ESP_OK;
+    }
+
     char *p = json_str;
-    p += sprintf(p, "{\"scanning\":%s,\"direction\":%s,\"current_line\":%d,\"samples\":%d,\"transferred_samples\":%d,\"lines\":%d,\"scan_rate\":%.1f,\"frame_completed\":%s,\"row0\":[",
-                scanning ? "true" : "false", scan_direction_upward ? "true" : "false", current_scan_line, scan_samples, TRASNFERED_SAMPLES_PER_LINE, scan_lines, scan_rate, frame_completed ? "true" : "false");
+    p += sprintf(p, "{\"ready\":true,\"scanning\":%s,\"direction\":%s,\"current_line\":%d,\"samples\":%d,\"transferred_samples\":%d,\"lines\":%d,\"scan_rate\":%.1f,\"frame_completed\":%s,\"row0\":[",
+                scanning ? "true" : "false", scan_direction_upward ? "true" : "false", display_line, scan_samples, TRASNFERED_SAMPLES_PER_LINE, scan_lines, scan_rate, frame_completed ? "true" : "false");
     for (int x = 0; x < TRASNFERED_SAMPLES_PER_LINE; x++) {
-        p += sprintf(p, "%.3f", scan_data_t[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
+        p += sprintf(p, "%.3f", scan_data_t[display_line][x] / 4096.0f);
         if (x < TRASNFERED_SAMPLES_PER_LINE - 1) p += sprintf(p, ",");
     }
     p += sprintf(p, "],\"row1\":[");
     for (int x = 0; x < TRASNFERED_SAMPLES_PER_LINE; x++) {
-        p += sprintf(p, "%.3f", scan_data_r[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
+        p += sprintf(p, "%.3f", scan_data_r[display_line][x] / 4096.0f);
         if (x < TRASNFERED_SAMPLES_PER_LINE - 1) p += sprintf(p, ",");
     }
     p += sprintf(p, "]}");
@@ -823,6 +836,7 @@ static esp_err_t get_scan_data_handler(httpd_req_t *req)
     httpd_resp_send(req, json_str, strlen(json_str));
     free(json_str);
     frame_completed = false; // reset after sending
+    line_data_ready = false; // reset until next line is ready
     return ESP_OK;
 }
 
@@ -972,7 +986,7 @@ static void scan_task(void *arg)
             //Generate data for current line
             
             if(gpio_get_level(GPIO_SCANDATA_READY)) {
-                ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
+                
 
                 for (int i = 0; i < TRASNFERED_SAMPLES_PER_LINE; i++) {
                     //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
@@ -980,19 +994,15 @@ static void scan_task(void *arg)
                     // printf("0x%x ",line_rx_buf[i]);
                 }
                 // printf("\n");
+                ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
 
             }
             else{
-
-                ESP_LOGI(TAG, "R: Scan line %d completed", current_scan_line);
-
                 for (int i = 0; i < TRASNFERED_SAMPLES_PER_LINE; i++) {
-                    //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
                     scan_data_r[current_scan_line][i] = line_rx_buf[i];
-                    //printf("0x%x ",line_rx_buf[i]);
                 }
-                // printf("\n");
-                // Update current line
+                ready_scan_line = current_scan_line;
+                // Update current line after retrace has completed for ready_scan_line.
                 if (scan_direction_upward) {
                     current_scan_line--;
                     if (current_scan_line < 0) {
@@ -1008,8 +1018,10 @@ static void scan_task(void *arg)
                         frame_completed = true;
                     }
                 }
-
+                line_data_ready = true; // set flag to indicate new line data is ready for retrieval
+                ESP_LOGI(TAG, "R: Scan line %d completed", ready_scan_line);
             }
+
             //ESP_LOGI(TAG, "Scan line %d completed", current_scan_line);
 
         }
