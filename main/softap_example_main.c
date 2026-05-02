@@ -76,7 +76,7 @@
 
 
 
-static const char *TAG = "stepper_ap";
+static const char *TAG = "WAFM";
 
 typedef enum {
     CMD_MOVE = 0,
@@ -738,11 +738,11 @@ static esp_err_t scan_toggle_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to transmit scan toggle cmd: %s", esp_err_to_name(err) );
     }
-    printf("SPI response: \n"); // For debugging, print any response from master  
-    for (int i = 0; i < t.length / 8 && i < sizeof(spi_rx_buf); i++) {
-        printf("%02X ", spi_rx_buf[i]);
-    }
-    printf("\n");   
+    // printf("SPI response: \n"); // For debugging, print any response from master  
+    // for (int i = 0; i < t.length / 8 && i < sizeof(spi_rx_buf); i++) {
+    //     printf("%02X ", spi_rx_buf[i]);
+    // }
+    // printf("\n");   
 
     ESP_LOGI(TAG, "Scanning %s", scanning ? "started" : "stopped");
     return httpd_resp_sendstr(req, "ok");
@@ -785,16 +785,16 @@ static esp_err_t set_direction_handler(httpd_req_t *req)
 
 static esp_err_t get_scan_data_handler(httpd_req_t *req)
 {
-    int adjacent_line = current_scan_line;
-    if (scan_direction_upward) {
-        if (current_scan_line + 1 < scan_lines) {
-            adjacent_line = current_scan_line + 1;
-        }
-    } else {
-        if (current_scan_line - 1 >= 0) {
-            adjacent_line = current_scan_line - 1;
-        }
-    }
+    // int adjacent_line = current_scan_line;
+    // if (scan_direction_upward) {
+    //     if (current_scan_line + 1 < scan_lines) {
+    //         adjacent_line = current_scan_line + 1;
+    //     }
+    // } else {
+    //     if (current_scan_line - 1 >= 0) {
+    //         adjacent_line = current_scan_line - 1;
+    //     }
+    // }
 
     char *json_str = malloc(64 * 1024); // 64KB buffer
     if (!json_str) {
@@ -976,9 +976,9 @@ static void scan_task(void *arg)
                 for (int i = 0; i < 1000; i++) {
                     //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
                     scan_data_t[current_scan_line][i] = line_rx_buf[i];
-                    printf("0x%x ",line_rx_buf[i]);
+                    // printf("0x%x ",line_rx_buf[i]);
                 }
-                printf("\n");
+                // printf("\n");
 
             }
             else{
@@ -988,9 +988,9 @@ static void scan_task(void *arg)
                 for (int i = 0; i < 1000; i++) {
                     //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
                     scan_data_r[current_scan_line][i] = line_rx_buf[i];
-                    printf("0x%x ",line_rx_buf[i]);
+                    //printf("0x%x ",line_rx_buf[i]);
                 }
-                printf("\n");
+                // printf("\n");
                 // Update current line
                 if (scan_direction_upward) {
                     current_scan_line--;
