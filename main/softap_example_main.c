@@ -68,6 +68,7 @@
 #define MAX_SAMPLES 1024
 #define MAX_LINES 1024
 
+#define TRASNFERED_SAMPLES_PER_LINE 1000    // number of samples transferred to master per line (only for trace or retrace) (must be <= MAX_SAMPLES)
 
 #define ADDR_SCAN_PARAMS    0x0001
 #define ADDR_SCAN_ONOFF     0x0002
@@ -204,7 +205,10 @@ static const char *INDEX_HTML =
     "<button onclick='updateScanParams()'>Update</button></section>"
     "<section><button id='scanBtn' onclick='toggleScan()' class='secondary'>Scan Start</button>"
     "<button onclick='setDirection(true)'>Upward</button><button onclick='setDirection(false)'>Downward</button></section>"
-    "<section><label>Save data after scan</label><input id='saveData' type='checkbox'></section></div></div>"
+    "<section><label>Save data after scan</label><input id='saveData' type='checkbox'></section>"
+    "<section><label>Bitmap display</label>"
+    "<input type='radio' id='bitmapTrace' name='bitmapType' value='trace' checked><label for='bitmapTrace'>Trace</label>"
+    "<input type='radio' id='bitmapRetrace' name='bitmapType' value='retrace'><label for='bitmapRetrace'>Retrace</label></section></div></div>"
     "<h1>Height Image</h1>"
     "<section><canvas id='bitmapCanvas' width='1024' height='1024'></canvas></section>"
     "<section><canvas id='curveCanvas' width='400' height='200'></canvas></section>"
@@ -238,9 +242,9 @@ static const char *INDEX_HTML =
     "}"
     "function updateDisplay(){"
     "fetch('/api/get_scan_data').then(r=>r.json()).then(data=>{"
-    "if(data.frame_completed && document.getElementById('saveData').checked){if(confirm('Frame completed. Save data?')){downloadData(dataArray, data.lines, data.samples);}}"
-    "updateBitmap(data.current_row, data.current_line, data.samples, data.lines);"
-    "updateCurve(data.row0, data.row1, data.samples);"
+    "if(data.frame_completed && document.getElementById('saveData').checked){if(confirm('Frame completed. Save data?')){downloadData(dataArray, data.lines, data.transferred_samples);}}"
+    "updateBitmap(data, data.current_line, data.transferred_samples, data.lines);"
+    "updateCurve(data.row0, data.row1, data.transferred_samples);"
     "updateStatus(data.scanning, data.direction, data.current_line);"
     "const targetRate = data.scanning && data.scan_rate > 0 ? data.scan_rate : 1;"
     "setUpdateInterval(targetRate);"
@@ -250,22 +254,24 @@ static const char *INDEX_HTML =
     "let txt='';for(let y=0;y<lines;y++){for(let x=0;x<samples;x++){txt+=data[y][x].toFixed(3);if(x<samples-1)txt+=' ';}txt+='\\n';}"
     "const blob=new Blob([txt],{type:'text/plain'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='scan_data.txt';a.click();URL.revokeObjectURL(url);}"
     "let dataArray = [];"
-    "function updateBitmap(currentRow, line, samples, lines){"
+    "function updateBitmap(data, line, transferred_samples, lines){"
     "const targetSize = 1024;"
-    "if(dataArray.length !== lines || (dataArray[0] && dataArray[0].length !== samples)){dataArray = new Array(lines).fill().map(() => new Array(samples).fill(0));}"
-    "dataArray[line] = currentRow;"
+    "if(dataArray.length !== lines || (dataArray[0] && dataArray[0].length !== transferred_samples)){dataArray = new Array(lines).fill().map(() => new Array(transferred_samples).fill(0));}"
+    "const bitmapType = document.querySelector('input[name=\"bitmapType\"]:checked').value;"
+    "const selectedRow = bitmapType === 'trace' ? data.row0 : data.row1;"
+    "dataArray[line] = selectedRow;"
     "const canvas=document.getElementById('bitmapCanvas');const ctx=canvas.getContext('2d');"
     "const imgData=ctx.createImageData(targetSize, targetSize);"
-    "if(samples <= 0 || lines <= 0){ctx.putImageData(imgData,0,0);return;}"
+    "if(transferred_samples <= 0 || lines <= 0){ctx.putImageData(imgData,0,0);return;}"
     "for(let y=0;y<targetSize;y++){"
     "const fy = (lines - 1) * y / (targetSize - 1);"
     "const y0 = Math.floor(fy);"
     "const y1 = Math.min(lines - 1, y0 + 1);"
     "const ty = fy - y0;"
     "for(let x=0;x<targetSize;x++){"
-    "const fx = (samples - 1) * x / (targetSize - 1);"
+    "const fx = (transferred_samples - 1) * x / (targetSize - 1);"
     "const x0 = Math.floor(fx);"
-    "const x1 = Math.min(samples - 1, x0 + 1);"
+    "const x1 = Math.min(transferred_samples - 1, x0 + 1);"
     "const tx = fx - x0;"
     "const v00 = dataArray[y0][x0];"
     "const v10 = dataArray[y0][x1];"
@@ -282,12 +288,12 @@ static const char *INDEX_HTML =
     "imgData.data[idx + 3] = 255;"
     "}}"
     "ctx.putImageData(imgData,0,0);}"
-    "function updateCurve(row0, row1, samples){"
+    "function updateCurve(row0, row1, transferred_samples){"
     "const canvas=document.getElementById('curveCanvas');const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);"
-    "if(samples <= 0) return;"
+    "if(transferred_samples <= 0) return;"
     "ctx.lineWidth = 2;"
-    "ctx.strokeStyle='red';ctx.beginPath();ctx.moveTo(0,(1-row0[0])*canvas.height);for(let i=1;i<samples;i++){const x=i*(canvas.width/samples);const y=(1-row0[i])*canvas.height;ctx.lineTo(x,y);}ctx.stroke();"
-    "ctx.strokeStyle='blue';ctx.beginPath();ctx.moveTo(0,(1-row1[0])*canvas.height);for(let i=1;i<samples;i++){const x=i*(canvas.width/samples);const y=(1-row1[i])*canvas.height;ctx.lineTo(x,y);}ctx.stroke();}"
+    "ctx.strokeStyle='red';ctx.beginPath();ctx.moveTo(0,(1-row0[0])*canvas.height);for(let i=1;i<transferred_samples;i++){const x=i*(canvas.width/transferred_samples);const y=(1-row0[i])*canvas.height;ctx.lineTo(x,y);}ctx.stroke();"
+    "ctx.strokeStyle='blue';ctx.beginPath();ctx.moveTo(0,(1-row1[0])*canvas.height);for(let i=1;i<transferred_samples;i++){const x=i*(canvas.width/transferred_samples);const y=(1-row1[i])*canvas.height;ctx.lineTo(x,y);}ctx.stroke();}"
     "function updateStatus(scanning, direction, line){document.getElementById('statusBar').innerText=`Scanning: ${scanning?'Started':'Stopped'} | Direction: ${direction?'Upward':'Downward'} | Current Line: ${line}`;}"
     "setUpdateInterval(1);updateDisplay();"
     "</script></body></html>";
@@ -801,21 +807,16 @@ static esp_err_t get_scan_data_handler(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
     }
     char *p = json_str;
-    p += sprintf(p, "{\"scanning\":%s,\"direction\":%s,\"current_line\":%d,\"samples\":%d,\"lines\":%d,\"scan_rate\":%.1f,\"frame_completed\":%s,\"row0\":[",
-                scanning ? "true" : "false", scan_direction_upward ? "true" : "false", current_scan_line, scan_samples, scan_lines, scan_rate, frame_completed ? "true" : "false");
-    for (int x = 0; x < scan_samples; x++) {
+    p += sprintf(p, "{\"scanning\":%s,\"direction\":%s,\"current_line\":%d,\"samples\":%d,\"transferred_samples\":%d,\"lines\":%d,\"scan_rate\":%.1f,\"frame_completed\":%s,\"row0\":[",
+                scanning ? "true" : "false", scan_direction_upward ? "true" : "false", current_scan_line, scan_samples, TRASNFERED_SAMPLES_PER_LINE, scan_lines, scan_rate, frame_completed ? "true" : "false");
+    for (int x = 0; x < TRASNFERED_SAMPLES_PER_LINE; x++) {
         p += sprintf(p, "%.3f", scan_data_t[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
-        if (x < scan_samples - 1) p += sprintf(p, ",");
+        if (x < TRASNFERED_SAMPLES_PER_LINE - 1) p += sprintf(p, ",");
     }
     p += sprintf(p, "],\"row1\":[");
-    for (int x = 0; x < scan_samples; x++) {
+    for (int x = 0; x < TRASNFERED_SAMPLES_PER_LINE; x++) {
         p += sprintf(p, "%.3f", scan_data_r[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
-        if (x < scan_samples - 1) p += sprintf(p, ",");
-    }
-    p += sprintf(p, "],\"current_row\":[");
-    for (int x = 0; x < scan_samples; x++) {
-        p += sprintf(p, "%.3f", scan_data_t[current_scan_line][x] / 4096.0f); // Assuming 12-bit ADC, normalize to 0-1 range
-        if (x < scan_samples - 1) p += sprintf(p, ",");
+        if (x < TRASNFERED_SAMPLES_PER_LINE - 1) p += sprintf(p, ",");
     }
     p += sprintf(p, "]}");
     httpd_resp_set_type(req, "application/json");
@@ -949,10 +950,10 @@ static void scan_task(void *arg)
             scan_params_transfer.address = ADDR_SCAN_DATA;
             spi_slave_queue_reset(RCV_HOST); // Clear any pending transactions to ensure master gets the latest data    
             gpio_set_level(GPIO_HANDSHAKE, 0);
-            memset((uint8_t *)line_rx_buf, 0, 2000);
+            memset((uint8_t *)line_rx_buf, 0, TRASNFERED_SAMPLES_PER_LINE * 2); // Clear buffer before receiving new data
             // printf("Requesting scan data length = %d...\n", 2000);
 
-            t.length = 2000 * 8;
+            t.length = TRASNFERED_SAMPLES_PER_LINE * 2 * 8;
             t.tx_buffer = (uint8_t *)line_rx_buf;
             t.rx_buffer = (uint8_t *)line_rx_buf; // Optional: receive any response from master
             spi_data_request = true; // set flag to indicate new data is ready for transfer
@@ -973,7 +974,7 @@ static void scan_task(void *arg)
             if(gpio_get_level(GPIO_SCANDATA_READY)) {
                 ESP_LOGI(TAG, "T: Scan line %d completed", current_scan_line);    
 
-                for (int i = 0; i < 1000; i++) {
+                for (int i = 0; i < TRASNFERED_SAMPLES_PER_LINE; i++) {
                     //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
                     scan_data_t[current_scan_line][i] = line_rx_buf[i];
                     // printf("0x%x ",line_rx_buf[i]);
@@ -985,7 +986,7 @@ static void scan_task(void *arg)
 
                 ESP_LOGI(TAG, "R: Scan line %d completed", current_scan_line);
 
-                for (int i = 0; i < 1000; i++) {
+                for (int i = 0; i < TRASNFERED_SAMPLES_PER_LINE; i++) {
                     //scan_data[current_scan_line][i] = (float)rand() / RAND_MAX;
                     scan_data_r[current_scan_line][i] = line_rx_buf[i];
                     //printf("0x%x ",line_rx_buf[i]);
@@ -1129,7 +1130,7 @@ void spi_slave_init(void)
 
     //generate an semaphore manually.
     //xSemaphoreGive(scan_rdy_sem);
-    line_rx_buf = heap_caps_aligned_alloc(4, 2000,    MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    line_rx_buf = heap_caps_aligned_alloc(4, TRASNFERED_SAMPLES_PER_LINE * 2 ,    MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL); // spi receive buffer for one line of scan data (1000 samples * 2 bytes each)
 
 
 }
