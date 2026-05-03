@@ -214,7 +214,7 @@ static const char *INDEX_HTML =
     "<input type='radio' id='bitmapRetrace' name='bitmapType' value='retrace'><label for='bitmapRetrace'>Retrace</label></section></div></div>"
     "<h1>Height Image</h1>"
     "<section><canvas id='bitmapCanvas' width='1024' height='1024'></canvas></section>"
-    "<section><canvas id='curveCanvas' width='400' height='200'></canvas></section>"
+    "<section><canvas id='curveCanvas' width='1024' height='200'></canvas></section>"
     "<div class='status' id='statusBar'>Scanning: Stopped | Direction: Upward | Current Line: 0</div>"
     "<script>const fetchPost=(url,body)=>fetch(url,{method:'POST',headers:{'Content-Type':'text/plain'},body});"
     "function setMaxSpeed(){const v=document.getElementById('vmax').value;fetchPost('/api/max_speed',v);}"
