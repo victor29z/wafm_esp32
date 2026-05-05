@@ -49,8 +49,12 @@
 /* SPI Host for RCV */
 #define RCV_HOST    SPI2_HOST
 
-#define GPIO_HANDSHAKE      21
-#define GPIO_SCANDATA_REQ   42
+//#define GPIO_HANDSHAKE      21
+//#define GPIO_SCANDATA_REQ   42
+
+#define GPIO_HANDSHAKE      17
+#define GPIO_SCANDATA_REQ   18
+
 
 #define GPIO_MOSI           12
 #define GPIO_MISO           13
